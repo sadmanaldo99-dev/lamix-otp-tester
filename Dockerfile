@@ -4,7 +4,7 @@ FROM mcr.microsoft.com/playwright/python:v1.40.0-jammy
 # ২. ওয়ার্কিং ডিরেক্টরি সেটআপ
 WORKDIR /app
 
-# ৩. প্রজেক্টের ফাইল কপি করা
+# ৩. প্রজেক্টের সব ফাইল কপি করা
 COPY . /app
 
 # ৪. ডিপেনডেন্সি ইনস্টল করা
