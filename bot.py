@@ -9,7 +9,8 @@ from telegram.ext import Application, CommandHandler, ContextTypes
 nest_asyncio.apply()
 
 # ----------------- CONFIGURATION -----------------
-BOT_TOKEN = "YOUR_TELEGRAM_BOT_TOKEN_HERE"  # আপনার টেলিগ্রাম বট টোকেন দিন
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+
 # -------------------------------------------------
 
 async def scrape_lamix(query: str):
