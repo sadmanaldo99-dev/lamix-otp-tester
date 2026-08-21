@@ -69,40 +69,48 @@ async def get_browser():
         )
     return browser_instance
 
-async def get_service_range(service_name):
+async async def get_service_range(service_name):
     try:
         browser = await get_browser()
         page = await browser.new_page()
         log(f"🔎 Scraping Lamix for: {service_name}")
         
-        await page.goto("https://www.lamix.org/tools", wait_until="domcontentloaded", timeout=25000)
-        await page.fill('input[type="text"]', service_name)
-        await page.click('#search-btn')
-        await page.wait_for_timeout(2500)
+        # ১. পেজ লোড হওয়া পর্যন্ত ওয়েট
+        await page.goto("https://www.lamix.org/tools", wait_until="networkidle", timeout=30000)
+        
+        # ২. ইনপুট ফিল্ড ও সার্চ
+        input_element = await page.wait_for_selector('input[type="text"]', timeout=10000)
+        await input_element.fill(service_name)
+        await page.keyboard.press("Enter")
+        
+        # ৩. ডাটা টেবিল বা রেজাল্ট লোড হওয়ার সময় দেওয়া (৪ সেকেন্ড)
+        await page.wait_for_timeout(4000)
         
         content = await page.content()
         await page.close()
         
         soup = BeautifulSoup(content, 'html.parser')
-        text = soup.get_text()
         
-        numbers = re.findall(r"\+?\d{4,15}", text)
-        if numbers:
-            return numbers[0]
-            
-        for element in soup.find_all(["tr", "div", "p", "td"]):
-            elem_text = element.get_text().strip()
-            if service_name.lower() in elem_text.lower():
-                found_nums = re.findall(r"\+?\d{4,15}", elem_text)
-                if found_nums:
-                    return found_nums[0]
+        # টেবিলের ভেতর ডাটা খোঁজা (Lamix-এ সাধারণত td বা tr-এ থাকে)
+        for row in soup.find_all(["tr", "div", "li"]):
+            text = row.get_text().strip()
+            if service_name.lower() in text.lower():
+                numbers = re.findall(r"\+?\d{4,15}", text)
+                if numbers:
+                    log(f"✅ Range Found for {service_name}: {numbers[0]}")
+                    return numbers[0]
+
+        # ব্যাকআপ: পুরো পেজে নম্বর খোঁজা
+        all_numbers = re.findall(r"\+?\d{4,15}", soup.get_text())
+        if all_numbers:
+            log(f"✅ Range Found (Fallback) for {service_name}: {all_numbers[0]}")
+            return all_numbers[0]
 
     except Exception as e:
         log(f"❌ Scraping Error for {service_name}: {e}")
 
     return None
-
-def get_number_by_range(service_name, target_range):
+   ef gst_fef get_number_by_range(service_name, target_range):
     params = {
         "action": "getNumber",
         "token": LAMIX_TOKEN,
