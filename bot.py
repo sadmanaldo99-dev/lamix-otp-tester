@@ -3,7 +3,6 @@ import re
 import asyncio
 import requests
 from bs4 import BeautifulSoup
-from playwright.async_api import async_playwright
 from telegram import Update
 from telegram.ext import (
     ApplicationBuilder,
@@ -19,16 +18,12 @@ PUBLIC_CHANNEL_ID = os.environ.get("CHAT_ID")
 LAMIX_API_URL = os.environ.get("LAMIX_API_URL")
 LAMIX_TOKEN = os.environ.get("LAMIX_TOKEN")
 
-# Global State & Browser Management
+# Global State
 waiting_for_added_event = asyncio.Event()
-playwright_instance = None
-browser_instance = None
 
 def log(text):
-    """রিয়েলটাইম টার্মিনাল লগের জন্য"""
     print(text, flush=True)
 
-# ১. টেক্সট থেকে সার্ভিস ফিল্টার
 def extract_services_from_text(raw_text):
     if raw_text.startswith("/"):
         raw_text = raw_text.split(" ", 1)[-1] if " " in raw_text else ""
@@ -55,67 +50,51 @@ def extract_services_from_text(raw_text):
 
     return cleaned_services
 
-# ২. একক ব্রাউজার ইন্সট্যান্স ম্যানেজমেন্ট
-async def get_browser():
-    global playwright_instance, browser_instance
-    if not browser_instance or not browser_instance.is_connected():
-        log("🚀 Starting Playwright Browser...")
-        playwright_instance = await async_playwright().start()
-        browser_instance = await playwright_instance.chromium.launch(
-            headless=True,
-            args=[
-                '--no-sandbox',
-                '--disable-setuid-sandbox',
-                '--disable-dev-shm-usage',
-                '--single-process'
-            ]
-        )
-    return browser_instance
-
-# ৩. Playwright দিয়ে Lamix-এর Tools থেকে Range খুঁজে বের করা
+# সরাসরি HTTP Post/Get দিয়ে ফাস্ট Range সার্চ
 async def get_service_range(service_name):
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    }
+    
+    # পদ্ধতি ১: ডিরেক্ট টুলস সার্চ রিকোয়েস্ট
     try:
-        browser = await get_browser()
-        page = await browser.new_page()
-        log(f"🔎 Scraping Lamix for: {service_name}")
+        url = f"https://www.lamix.org/tools?search={service_name}"
+        res = requests.get(url, headers=headers, timeout=12)
         
-        # ১. পেজে যাওয়া এবং নেটওয়ার্ক লোড হওয়া পর্যন্ত ওয়েট
-        await page.goto("https://www.lamix.org/tools", wait_until="networkidle", timeout=30000)
+        soup = BeautifulSoup(res.text, 'html.parser')
         
-        # ২. ইনপুট বক্সে লেখা এবং সার্চ ট্রিগার
-        input_element = await page.wait_for_selector('input[type="text"]', timeout=10000)
-        await input_element.fill(service_name)
-        await page.keyboard.press("Enter")
-        
-        # ৩. সার্চ রেজাল্ট লোড হওয়ার জন্য ৪ সেকেন্ড সময় দেওয়া
-        await page.wait_for_timeout(4000)
-        
-        content = await page.content()
-        await page.close()
-        
-        soup = BeautifulSoup(content, 'html.parser')
-        
-        # ৪. রেজাল্ট টেবিল থেকে নম্বর / রেঞ্জ খোঁজা
-        for row in soup.find_all(["tr", "div", "li", "td"]):
-            text = row.get_text().strip()
-            if service_name.lower() in text.lower():
-                numbers = re.findall(r"\+?\d{4,15}", text)
-                if numbers:
-                    log(f"✅ Range Found for {service_name}: {numbers[0]}")
-                    return numbers[0]
-
-        # ব্যাকআপ: পেজের পুরো টেক্সট থেকে নম্বর খোঁজা
-        all_numbers = re.findall(r"\+?\d{4,15}", soup.get_text())
-        if all_numbers:
-            log(f"✅ Range Found (Fallback) for {service_name}: {all_numbers[0]}")
-            return all_numbers[0]
-
+        # সার্ভিস নাম মিলিয়ে নম্বর ফিল্টার
+        for element in soup.find_all(["tr", "div", "p", "td", "li"]):
+            elem_text = element.get_text().strip()
+            if service_name.lower() in elem_text.lower():
+                found_nums = re.findall(r"\+?\d{4,15}", elem_text)
+                if found_nums:
+                    log(f"✅ Found range via direct HTTP for {service_name}: {found_nums[0]}")
+                    return found_nums[0]
+                    
     except Exception as e:
-        log(f"❌ Scraping Error for {service_name}: {e}")
+        log(f"Direct fetch failed: {e}")
+
+    # পদ্ধতি ২: ব্যাকআপ API রেঞ্জ খোঁজা (API Token দিয়ে)
+    if LAMIX_API_URL and LAMIX_TOKEN:
+        try:
+            params = {
+                "action": "getServices",
+                "token": LAMIX_TOKEN
+            }
+            res = requests.get(LAMIX_API_URL, params=params, timeout=10).json()
+            if isinstance(res, dict):
+                for key, val in res.items():
+                    if service_name.lower() in str(val).lower():
+                        nums = re.findall(r"\+?\d{4,15}", str(val))
+                        if nums:
+                            log(f"✅ Found range via API for {service_name}: {nums[0]}")
+                            return nums[0]
+        except Exception as e:
+            log(f"API Range Search Error: {e}")
 
     return None
 
-# ৪. প্যানেল থেকে নম্বর নেওয়ার ফাংশন
 def get_number_by_range(service_name, target_range):
     params = {
         "action": "getNumber",
@@ -131,7 +110,6 @@ def get_number_by_range(service_name, target_range):
         log(f"Get Number Error: {e}")
     return None, None
 
-# ৫. OTP স্ট্যাটাস চেক
 def check_otp(order_id):
     params = {"action": "getStatus", "token": LAMIX_TOKEN, "id": order_id}
     try:
@@ -142,7 +120,6 @@ def check_otp(order_id):
         log(f"Check OTP Error: {e}")
     return None
 
-# ৬. অর্ডার ক্যানসেল করা
 def cancel_order(order_id):
     params = {
         "action": "setStatus",
@@ -155,7 +132,6 @@ def cancel_order(order_id):
     except Exception as e:
         log(f"Cancel Error: {e}")
 
-# ৭. মূল অটো-টেস্টিং লুপ
 async def test_websites_loop(context: ContextTypes.DEFAULT_TYPE, chat_id: int, services: list):
     global waiting_for_added_event
 
@@ -254,7 +230,6 @@ async def test_websites_loop(context: ContextTypes.DEFAULT_TYPE, chat_id: int, s
                 parse_mode="Markdown",
             )
 
-# ৮. মেসেজ হ্যান্ডলার
 async def handle_all_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global waiting_for_added_event
     text = update.message.text.strip()
