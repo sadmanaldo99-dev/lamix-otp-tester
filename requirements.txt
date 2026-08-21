@@ -4,3 +4,4 @@ beautifulsoup4
 browser-use
 langchain-groq
 playwright
+pydantic-settings
