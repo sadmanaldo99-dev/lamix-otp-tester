@@ -2,6 +2,7 @@ import asyncio
 import json
 import os
 import re
+import cloudscraper
 import requests
 from bs4 import BeautifulSoup
 from telegram import Update
@@ -51,26 +52,26 @@ def extract_services_from_text(raw_text):
     return cleaned_services
 
 
-# ২. lamix.org/tools থেকে Web Scraping ও API সার্চের মাধ্যমে Range বের করা
+# ২. Cloudscraper ব্যবহার করে lamix.org/tools বাইপাস ও Range বের করার ফাংশন
 def get_service_range(service_name):
+    # Cloudflare প্রোটেকশন বাইপাস করার জন্য Scraper অবজেক্ট
+    scraper = cloudscraper.create_scraper(
+        browser={
+            "browser": "chrome",
+            "platform": "android",
+            "desktop": False,
+        }
+    )
+
     url = "https://www.lamix.org/tools"
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-        "X-Requested-With": "XMLHttpRequest",
-        "Referer": "https://www.lamix.org/tools",
-    }
 
     # ১. POST রিকোয়েস্ট (Tools Search Form)
     try:
-        response = requests.post(
-            url,
-            data={"search": service_name, "query": service_name},
-            headers=headers,
-            timeout=10,
-        )
+        payload = {"search": service_name, "query": service_name}
+        response = scraper.post(url, data=payload, timeout=12)
 
-        # যদি JSON রেসপন্স আসে
-        if "application/json" in response.headers.get("Content-Type", ""):
+        # যদি JSON ডাটা ফেরত দেয়
+        try:
             data = response.json()
             if isinstance(data, list) and len(data) > 0:
                 item = data[0]
@@ -88,25 +89,27 @@ def get_service_range(service_name):
                         or results[0].get("cli")
                         or results[0].get("prefix")
                     )
+        except Exception:
+            pass
 
-        # যদি HTML রেসপন্স আসে
+        # যদি HTML ডাটা ফেরত দেয়
         soup = BeautifulSoup(response.text, "html.parser")
-        rows = soup.find_all(["tr", "div", "li"])
-        for row in rows:
-            text = row.get_text().strip()
-            if service_name.lower() in text.lower():
-                numbers = re.findall(r"\+?\d{4,15}", text)
+
+        # সকল টেবিল রোর ডাটা দেখা
+        for row in soup.find_all(["tr", "div", "p", "li"]):
+            row_text = row.get_text().strip()
+            if service_name.lower() in row_text.lower():
+                # সার্ভিস ম্যাচ করলে নম্বর/রেঞ্জ খোঁজা
+                numbers = re.findall(r"\+?\d{4,15}", row_text)
                 if numbers:
                     return numbers[0]
 
     except Exception as e:
-        print(f"POST Range Search Error: {e}")
+        print(f"Cloudscraper POST Error: {e}")
 
-    # ২. GET রিকোয়েস্ট (Fallback Search)
+    # ২. GET রিকোয়েস্ট (Fallback)
     try:
-        get_res = requests.get(
-            f"{url}?search={service_name}", headers=headers, timeout=10
-        )
+        get_res = scraper.get(f"{url}?search={service_name}", timeout=12)
         soup = BeautifulSoup(get_res.text, "html.parser")
         for row in soup.find_all("tr"):
             if service_name.lower() in row.get_text().lower():
@@ -114,7 +117,7 @@ def get_service_range(service_name):
                 if len(cols) >= 2:
                     return cols[1].get_text().strip()
     except Exception as e:
-        print(f"GET Fallback Error: {e}")
+        print(f"Cloudscraper GET Error: {e}")
 
     return None
 
