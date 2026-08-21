@@ -2,7 +2,6 @@ import os
 import re
 import asyncio
 import httpx
-from bs4 import BeautifulSoup
 from telegram import Update
 from telegram.ext import (
     ApplicationBuilder,
@@ -11,108 +10,55 @@ from telegram.ext import (
     MessageHandler,
     filters,
 )
+from langchain_groq import ChatGroq
+from browser_use import Agent
 
 # Environment Variables
 TELEGRAM_BOT_TOKEN = os.environ.get("BOT_TOKEN") or os.environ.get("TELEGRAM_BOT_TOKEN")
 PUBLIC_CHANNEL_ID = os.environ.get("CHAT_ID")
 LAMIX_API_URL = os.environ.get("LAMIX_API_URL")
 LAMIX_TOKEN = os.environ.get("LAMIX_TOKEN")
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 
-# Chat specific waiting state
 waiting_events = {}
 
 def log(text):
     print(text, flush=True)
 
-def extract_services_from_text(raw_text):
-    if raw_text.startswith("/"):
-        raw_text = raw_text.split(" ", 1)[-1] if " " in raw_text else ""
-
-    lines = raw_text.split("\n")
-    cleaned_services = []
-    clean_pattern = re.compile(r"[^\w\s-]")
-
+# ১. ইনপুট ফরম্যাট থেকে service:range বের করার লজিক (যেমন: ebay:972)
+def parse_service_and_range(raw_text):
+    lines = raw_text.strip().split("\n")
+    tasks = []
     for line in lines:
         line_str = line.strip()
+        if ":" in line_str:
+            parts = line_str.split(":", 1)
+            service = parts[0].strip().lower()
+            country_range = parts[1].strip()
+            if service and country_range:
+                tasks.append((service, country_range))
+    return tasks
 
-        if any(
-            header in line_str.upper()
-            for header in ["CONTENT", "SMS", "TOP SIDS", "ALGERIA", "HTTP"]
-        ):
-            if "CONTENT" in line_str.upper():
-                break
-            continue
-
-        cleaned = clean_pattern.sub("", line_str).strip()
-
-        if cleaned and not cleaned.isdigit() and len(cleaned) > 1:
-            cleaned_services.append(cleaned.lower())
-
-    return cleaned_services
-
-# Advanced Async Range Search
-async def get_service_range(service_name):
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-    }
-    
-    clean_service = service_name.strip().lower()
-    
-    async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as client:
-        # পদ্ধতি ১: ডিরেক্ট ওয়েব স্ক্র্যাপিং
-        try:
-            url = f"https://www.lamix.org/tools?search={clean_service}"
-            res = await client.get(url, headers=headers)
-            
+# ২. Temp Mail জেনারেটর
+async def generate_temp_mail():
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            res = await client.get("https://www.1secmail.com/api/v1/?action=genRandomMailbox&count=1")
             if res.status_code == 200:
-                soup = BeautifulSoup(res.text, 'html.parser')
-                
-                for element in soup.find_all(["tr", "div", "p", "td", "li", "span"]):
-                    elem_text = element.get_text().strip()
-                    if clean_service in elem_text.lower():
-                        found_nums = re.findall(r"\+?\d[\d\s-]{3,14}\d", elem_text)
-                        if found_nums:
-                            clean_range = found_nums[0].replace(" ", "").replace("-", "")
-                            log(f"✅ Found range via Direct Web for {service_name}: {clean_range}")
-                            return clean_range
-            else:
-                log(f"Web Search Blocked/Failed with status: {res.status_code}")
-                        
-        except Exception as e:
-            log(f"Direct fetch failed: {e}")
+                emails = res.json()
+                if emails:
+                    return emails[0]
+    except Exception as e:
+        log(f"Temp Mail Error: {e}")
+    return "testuser_temp@1secmail.com"
 
-        # পদ্ধতি ২: নিরাপদ ব্যাকআপ API রেঞ্জ খোঁজা
-        if LAMIX_API_URL and LAMIX_TOKEN:
-            try:
-                params = {
-                    "action": "getServices",
-                    "token": LAMIX_TOKEN
-                }
-                res = await client.get(LAMIX_API_URL, params=params)
-                
-                if res.status_code == 200:
-                    raw_text = res.text
-                    log(f"API Raw Response: {raw_text[:100]}")
-                    
-                    if clean_service in raw_text.lower():
-                        nums = re.findall(r"\+?\d{4,15}", raw_text)
-                        if nums:
-                            log(f"✅ Found range via API for {service_name}: {nums[0]}")
-                            return nums[0]
-                else:
-                    log(f"Lamix API Server responded with status code: {res.status_code}")
-            except Exception as e:
-                log(f"API Range Search Error: {e}")
-
-    return None
-
-async def get_number_by_range(service_name, target_range):
+# ৩. প্যানেল থেকে নম্বর বাই করা
+async def buy_number_from_panel(service, country_range):
     params = {
         "action": "getNumber",
         "token": LAMIX_TOKEN,
-        "service": service_name,
-        "range": target_range,
+        "service": service,
+        "range": country_range
     }
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
@@ -123,15 +69,37 @@ async def get_number_by_range(service_name, target_range):
                     if data.get("status") == "success":
                         return data.get("id"), data.get("number")
                 except Exception:
-                    # যদি JSON এর বদলে টেক্সট ফরম্যাটে রেসপন্স আসে (যেমন ACCESS_NUMBER:id:number)
                     if "ACCESS_NUMBER" in res.text:
                         parts = res.text.split(":")
                         return parts[1], parts[2]
     except Exception as e:
-        log(f"Get Number Error: {e}")
+        log(f"Buy Number Error: {e}")
     return None, None
 
-async def check_otp(order_id):
+# ৪. AI Browser Agent (যে নিজে ওয়েবসাইটে ঢুকে অটোমেটিক ইনপুট দেবে)
+async def run_ai_browser_agent(service, country_range, phone_number, email):
+    try:
+        llm = ChatGroq(
+            model="llama-3.3-70b-versatile",
+            groq_api_key=GROQ_API_KEY
+        )
+
+        prompt = (
+            f"Go to the sign up or account creation page of {service}. "
+            f"Fill the email field with {email} if required. "
+            f"Find the phone number input field, select country code or range {country_range}, "
+            f"and enter the number {phone_number}. Then click the submit or Send OTP button."
+        )
+
+        agent = Agent(task=prompt, llm=llm)
+        await agent.run()
+        return True
+    except Exception as e:
+        log(f"AI Agent Error: {e}")
+        return False
+
+# ৫. OTP চেক করা
+async def check_otp_status(order_id):
     params = {"action": "getStatus", "token": LAMIX_TOKEN, "id": order_id}
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
@@ -148,7 +116,8 @@ async def check_otp(order_id):
         log(f"Check OTP Error: {e}")
     return None
 
-async def cancel_order(order_id):
+# ৬. নম্বর বাতিল করা
+async def cancel_number_order(order_id):
     params = {
         "action": "setStatus",
         "token": LAMIX_TOKEN,
@@ -159,30 +128,21 @@ async def cancel_order(order_id):
         async with httpx.AsyncClient(timeout=10.0) as client:
             await client.get(LAMIX_API_URL, params=params)
     except Exception as e:
-        log(f"Cancel Error: {e}")
+        log(f"Cancel Order Error: {e}")
 
-async def test_websites_loop(context: ContextTypes.DEFAULT_TYPE, chat_id: int, services: list):
+# ৭. অটোমেশন টাস্ক লুপ
+async def run_automation_loop(context: ContextTypes.DEFAULT_TYPE, chat_id: int, tasks: list):
     global waiting_events
 
-    for service in services:
+    for service, country_range in tasks:
+        temp_email = await generate_temp_mail()
+        
         await context.bot.send_message(
             chat_id=chat_id,
-            text=f"🔍 *Searching Tools Web for:* `{service.upper()}`",
-            parse_mode="Markdown",
-        )
-
-        target_range = await get_service_range(service)
-        if not target_range:
-            await context.bot.send_message(
-                chat_id=chat_id,
-                text=f"⚠️ No CLI range found for `{service}` on Lamix Tools. Skipping...",
-                parse_mode="Markdown",
-            )
-            continue
-
-        await context.bot.send_message(
-            chat_id=chat_id,
-            text=f"📌 `{service.upper()}` Range Detected: `{target_range}`",
+            text=f"🎯 *New Task Started!*\n"
+                 f"🌐 Service: `{service.upper()}`\n"
+                 f"📍 Country Range: `{country_range}`\n"
+                 f"📧 Temp Email: `{temp_email}`",
             parse_mode="Markdown",
         )
 
@@ -191,14 +151,14 @@ async def test_websites_loop(context: ContextTypes.DEFAULT_TYPE, chat_id: int, s
             order_id, number = None, None
 
             while True:
-                order_id, number = await get_number_by_range(service, target_range)
+                order_id, number = await buy_number_from_panel(service, country_range)
                 if order_id and number:
                     break
 
                 await context.bot.send_message(
                     chat_id=chat_id,
-                    text=f"⚠️ *No numbers found in range `{target_range}` for `{service}`!*\n\n"
-                         f"👉 Please add numbers to panel and reply with `added`.",
+                    text=f"⚠️ *Stock Out!* No `{country_range}` numbers found for `{service}`.\n\n"
+                         f"👉 Add numbers to panel and reply with `added`.",
                     parse_mode="Markdown",
                 )
 
@@ -213,27 +173,39 @@ async def test_websites_loop(context: ContextTypes.DEFAULT_TYPE, chat_id: int, s
 
             await context.bot.send_message(
                 chat_id=chat_id,
-                text=f"🧪 *Attempt {attempt}/3* for `{service}`\n📱 Number: `{number}`\nWaiting for OTP...",
+                text=f"🧪 *Attempt {attempt}/3*\n"
+                     f"📱 Copied Number: `{number}`\n"
+                     f"🤖 *AI Agent navigating to `{service}` to submit number...*",
+                parse_mode="Markdown",
+            )
+
+            # AI ব্রাউজার এজেন্ট চালু হবে এবং ওয়েবসাইটে নম্বর সাবমিট করার চেষ্টা করবে
+            asyncio.create_task(run_ai_browser_agent(service, country_range, number, temp_email))
+
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text="⏳ Waiting for OTP code from panel...",
                 parse_mode="Markdown",
             )
 
             otp_received = None
             for _ in range(12):
                 await asyncio.sleep(5)
-                otp = await check_otp(order_id)
+                otp = await check_otp_status(order_id)
                 if otp:
                     otp_received = otp
                     break
 
             if otp_received:
                 alert_msg = (
-                    f"🚨 *OTP RECEIVED & METHOD LIVE!* 🚨\n\n"
-                    f"🌐 *Website:* `{service.upper()}`\n"
-                    f"🎯 *Range:* `{target_range}`\n"
-                    f"📱 *Number:* `{number}`\n"
-                    f"💬 *OTP Code:* `{otp_received}`\n\n"
-                    f"🔥 *সবাই কাজ শুরু করে দিতে পারো!*"
+                    f"🚨 *WORK METHOD IS LIVE!* 🚨\n\n"
+                    f"🌐 *Service:* `{service.upper()}`\n"
+                    f"🎯 *Country Range:* `{country_range}`\n"
+                    f"📱 *Tested Number:* `{number}`\n"
+                    f"💬 *Received OTP:* `{otp_received}`\n\n"
+                    f"🔥 *এই রেঞ্জে কাজ চলতেছে, সবাই কাজ শুরু করতে পারো!*"
                 )
+                
                 if PUBLIC_CHANNEL_ID:
                     try:
                         await context.bot.send_message(
@@ -242,30 +214,30 @@ async def test_websites_loop(context: ContextTypes.DEFAULT_TYPE, chat_id: int, s
                             parse_mode="Markdown",
                         )
                     except Exception as e:
-                        log(f"Public channel send error: {e}")
+                        log(f"Public Alert Error: {e}")
 
                 await context.bot.send_message(
                     chat_id=chat_id,
-                    text=f"✅ OTP Received for `{service}`! Public alert sent.",
+                    text=f"✅ *Success!* OTP received for `{service}`. Public alert sent!",
                     parse_mode="Markdown",
                 )
                 break
             else:
-                await cancel_order(order_id)
+                await cancel_number_order(order_id)
                 failed_attempts += 1
                 await context.bot.send_message(
                     chat_id=chat_id,
-                    text=f"❌ Attempt {attempt} failed for `{service}`. Canceled.",
+                    text=f"❌ Attempt {attempt} failed (No OTP). Order Canceled.",
                 )
 
         if failed_attempts == 3:
             await context.bot.send_message(
                 chat_id=chat_id,
-                text=f"⏭️ 3 attempts failed for `{service}`. Skipping to next...",
+                text=f"⏭️ 3 attempts failed for `{service}:{country_range}`. Moving to next...",
                 parse_mode="Markdown",
             )
 
-async def handle_all_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def handle_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global waiting_events
     chat_id = update.message.chat_id
     text = update.message.text.strip()
@@ -273,33 +245,33 @@ async def handle_all_messages(update: Update, context: ContextTypes.DEFAULT_TYPE
     if text.lower() == "added":
         if chat_id in waiting_events:
             waiting_events[chat_id].set()
-            await update.message.reply_text("👍 Resuming number search...")
+            await update.message.reply_text("👍 Resuming task search...")
         return
 
-    services = extract_services_from_text(text)
+    tasks = parse_service_and_range(text)
 
-    if not services:
+    if not tasks:
         await update.message.reply_text(
-            "⚠️ No valid service names found in the message."
+            "⚠️ Invalid format! Please send in this format:\n`ebay:972`\n`amazon:1`",
+            parse_mode="Markdown"
         )
         return
 
     await update.message.reply_text(
-        f"🚀 Detected {len(services)} service(s): `{', '.join(services)}`\nSearching CLI ranges...",
+        f"🚀 Received {len(tasks)} task(s). Starting automation loop...",
         parse_mode="Markdown",
     )
 
     asyncio.create_task(
-        test_websites_loop(context, chat_id, services)
+        run_automation_loop(context, chat_id, tasks)
     )
 
 def main():
     app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
     app.add_handler(
-        MessageHandler(filters.TEXT & ~filters.COMMAND, handle_all_messages)
+        MessageHandler(filters.TEXT & ~filters.COMMAND, handle_messages)
     )
-    app.add_handler(CommandHandler("test", handle_all_messages))
-    log("Fast Ultra-Light Tester Bot is Running...")
+    log("AI Automated Bot Running...")
     app.run_polling()
 
 if __name__ == "__main__":
