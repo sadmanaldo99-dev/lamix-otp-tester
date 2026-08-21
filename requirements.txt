@@ -1,7 +1,2 @@
 python-telegram-bot
-httpx
-beautifulsoup4
-browser-use
-langchain-groq
-playwright
-pydantic-settings
+psycopg2-binary
