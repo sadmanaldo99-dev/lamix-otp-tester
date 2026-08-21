@@ -1,4 +1,5 @@
 import asyncio
+import json
 import os
 import re
 import requests
@@ -50,62 +51,70 @@ def extract_services_from_text(raw_text):
     return cleaned_services
 
 
-# ২. lamix.org/tools থেকে সরাসরি ওয়েব স্ক্র্যাপ করে Range বের করার ফাংশন
+# ২. lamix.org/tools থেকে Web Scraping ও API সার্চের মাধ্যমে Range বের করা
 def get_service_range(service_name):
-    tools_url = "https://www.lamix.org/tools"
+    url = "https://www.lamix.org/tools"
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
         "X-Requested-With": "XMLHttpRequest",
+        "Referer": "https://www.lamix.org/tools",
     }
 
-    # ওয়েবসাইটের সার্চ রিকোয়েস্ট
-    payload = {"service": service_name, "search": service_name}
-
+    # ১. POST রিকোয়েস্ট (Tools Search Form)
     try:
-        # POST রিকোয়েস্ট ট্রাই
-        res = requests.post(tools_url, data=payload, headers=headers, timeout=10)
+        response = requests.post(
+            url,
+            data={"search": service_name, "query": service_name},
+            headers=headers,
+            timeout=10,
+        )
 
-        # যদি ওয়েব পেজ রেসপন্স হিসেবে HTML দেয় তবে তা পার্স করা
-        soup = BeautifulSoup(res.text, "html.parser")
+        # যদি JSON রেসপন্স আসে
+        if "application/json" in response.headers.get("Content-Type", ""):
+            data = response.json()
+            if isinstance(data, list) and len(data) > 0:
+                item = data[0]
+                return (
+                    item.get("range")
+                    or item.get("cli")
+                    or item.get("prefix")
+                    or item.get("country")
+                )
+            elif isinstance(data, dict):
+                results = data.get("results") or data.get("data") or []
+                if results:
+                    return (
+                        results[0].get("range")
+                        or results[0].get("cli")
+                        or results[0].get("prefix")
+                    )
 
-        # HTML টেবিল বা সার্চ রেজাল্ট থেকে Range খোঁজা
-        rows = soup.find_all("tr")
+        # যদি HTML রেসপন্স আসে
+        soup = BeautifulSoup(response.text, "html.parser")
+        rows = soup.find_all(["tr", "div", "li"])
         for row in rows:
-            text = row.get_text().lower()
-            if service_name.lower() in text:
-                cols = row.find_all("td")
-                if len(cols) >= 2:
-                    # টেবিল থেকে Range টেস্ট বের করা
-                    possible_range = cols[1].get_text().strip()
-                    if possible_range:
-                        return possible_range
-
-        # যদি সরাসরি JSON রেসপন্স আসে
-        try:
-            json_data = res.json()
-            if isinstance(json_data, list) and len(json_data) > 0:
-                return json_data[0].get("range") or json_data[0].get("cli")
-            elif isinstance(json_data, dict):
-                return json_data.get("range") or json_data.get("cli")
-        except Exception:
-            pass
+            text = row.get_text().strip()
+            if service_name.lower() in text.lower():
+                numbers = re.findall(r"\+?\d{4,15}", text)
+                if numbers:
+                    return numbers[0]
 
     except Exception as e:
-        print(f"Tools Scraping Error: {e}")
+        print(f"POST Range Search Error: {e}")
 
-    # ফলব্যাক: যদি POST না কাজ করে তবে GET দিয়ে চেষ্টা
+    # ২. GET রিকোয়েস্ট (Fallback Search)
     try:
-        res_get = requests.get(
-            f"{tools_url}?search={service_name}", headers=headers, timeout=10
+        get_res = requests.get(
+            f"{url}?search={service_name}", headers=headers, timeout=10
         )
-        soup = BeautifulSoup(res_get.text, "html.parser")
+        soup = BeautifulSoup(get_res.text, "html.parser")
         for row in soup.find_all("tr"):
             if service_name.lower() in row.get_text().lower():
                 cols = row.find_all("td")
                 if len(cols) >= 2:
                     return cols[1].get_text().strip()
     except Exception as e:
-        print(f"Fallback Scraping Error: {e}")
+        print(f"GET Fallback Error: {e}")
 
     return None
 
@@ -153,7 +162,7 @@ def cancel_order(order_id):
         print(f"Cancel Error: {e}")
 
 
-# ৬. মূল টেস্টিং লুপ
+# ৬. মূল অটো-টেস্টিং লুপ
 async def test_websites_loop(
     context: ContextTypes.DEFAULT_TYPE, chat_id: int, services: list
 ):
@@ -254,7 +263,7 @@ async def test_websites_loop(
             )
 
 
-# ৭. মেসেজ হ্যাণ্ডলার
+# ৭. মেসেজ হ্যান্ডলার
 async def handle_all_messages(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ):
@@ -293,7 +302,7 @@ def main():
     )
     app.add_handler(CommandHandler("test", handle_all_messages))
 
-    print("Smart Auto-Tester Bot with Web Tools Scraping is Running...")
+    print("Smart Auto-Tester Bot is Running...")
     app.run_polling()
 
 
