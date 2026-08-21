@@ -19,10 +19,14 @@ PUBLIC_CHANNEL_ID = os.environ.get("CHAT_ID")
 LAMIX_API_URL = os.environ.get("LAMIX_API_URL")
 LAMIX_TOKEN = os.environ.get("LAMIX_TOKEN")
 
-# Global State Management
+# Global State & Browser Management
 waiting_for_added_event = asyncio.Event()
+playwright_instance = None
+browser_instance = None
 
-# ১. টেক্সট থেকে সার্ভিস ফিল্টার
+def log(text):
+    print(text, flush=True)
+
 def extract_services_from_text(raw_text):
     if raw_text.startswith("/"):
         raw_text = raw_text.split(" ", 1)[-1] if " " in raw_text else ""
@@ -36,7 +40,7 @@ def extract_services_from_text(raw_text):
 
         if any(
             header in line_str.upper()
-            for header in ["CONTENT", "SMS", "TOP SIDS", "ALGERIA", "http"]
+            for header in ["CONTENT", "SMS", "TOP SIDS", "ALGERIA", "HTTP"]
         ):
             if "CONTENT" in line_str.upper():
                 break
@@ -49,11 +53,12 @@ def extract_services_from_text(raw_text):
 
     return cleaned_services
 
-
-# ২. Playwright ব্যবহার করে reCAPTCHA বাইপাস করে Range বের করার ফাংশন
-async def get_service_range(service_name):
-    async with async_playwright() as p:
-        browser = await p.chromium.launch(
+async def get_browser():
+    global playwright_instance, browser_instance
+    if not browser_instance or not browser_instance.is_connected():
+        log("🚀 Starting Playwright Browser...")
+        playwright_instance = await async_playwright().start()
+        browser_instance = await playwright_instance.chromium.launch(
             headless=True,
             args=[
                 '--no-sandbox',
@@ -62,48 +67,41 @@ async def get_service_range(service_name):
                 '--single-process'
             ]
         )
-        page = await browser.new_page()
-        
-        try:
-            # Lamix tools পেজে যাওয়া
-            await page.goto("https://www.lamix.org/tools", wait_until="domcontentloaded", timeout=30000)
-            
-            # সার্চ ইনপুট বক্সে মান দেওয়া
-            await page.fill('input[type="text"]', service_name)
-            
-            # সার্চ বাটনে ক্লিক
-            await page.click('#search-btn')
-            
-            # ৩ সেকেন্ড ওয়েট করা ডাটা লোড হওয়ার জন্য
-            await page.wait_for_timeout(3000)
-            
-            content = await page.content()
-            await browser.close()
-            
-            soup = BeautifulSoup(content, 'html.parser')
-            
-            # পেজের টেক্সট থেকে ফোন নম্বর / কান্ট্রি কোড / রেঞ্জ খোঁজা
-            text = soup.get_text()
-            numbers = re.findall(r"\+?\d{4,15}", text)
-            if numbers:
-                return numbers[0]
-            
-            # যদি সরাসরি রেঞ্জ রেজাল্ট টেবিল বা টেক্সটে থাকে
-            for element in soup.find_all(["tr", "div", "p", "td"]):
-                elem_text = element.get_text().strip()
-                if service_name.lower() in elem_text.lower():
-                    found_nums = re.findall(r"\+?\d{4,15}", elem_text)
-                    if found_nums:
-                        return found_nums[0]
+    return browser_instance
 
-        except Exception as e:
-            print(f"Playwright Scraping Error for {service_name}: {e}")
-            await browser.close()
+async def get_service_range(service_name):
+    try:
+        browser = await get_browser()
+        page = await browser.new_page()
+        log(f"🔎 Scraping Lamix for: {service_name}")
+        
+        await page.goto("https://www.lamix.org/tools", wait_until="domcontentloaded", timeout=25000)
+        await page.fill('input[type="text"]', service_name)
+        await page.click('#search-btn')
+        await page.wait_for_timeout(2500)
+        
+        content = await page.content()
+        await page.close()
+        
+        soup = BeautifulSoup(content, 'html.parser')
+        text = soup.get_text()
+        
+        numbers = re.findall(r"\+?\d{4,15}", text)
+        if numbers:
+            return numbers[0]
+            
+        for element in soup.find_all(["tr", "div", "p", "td"]):
+            elem_text = element.get_text().strip()
+            if service_name.lower() in elem_text.lower():
+                found_nums = re.findall(r"\+?\d{4,15}", elem_text)
+                if found_nums:
+                    return found_nums[0]
+
+    except Exception as e:
+        log(f"❌ Scraping Error for {service_name}: {e}")
 
     return None
 
-
-# ৩. নির্দিষ্ট Range-এর নম্বর নেওয়ার ফাংশন
 def get_number_by_range(service_name, target_range):
     params = {
         "action": "getNumber",
@@ -116,11 +114,9 @@ def get_number_by_range(service_name, target_range):
         if res.get("status") == "success":
             return res.get("id"), res.get("number")
     except Exception as e:
-        print(f"Get Number Error: {e}")
+        log(f"Get Number Error: {e}")
     return None, None
 
-
-# ৪. OTP চেক করার ফাংশন
 def check_otp(order_id):
     params = {"action": "getStatus", "token": LAMIX_TOKEN, "id": order_id}
     try:
@@ -128,11 +124,9 @@ def check_otp(order_id):
         if res.get("status") == "STATUS_OK":
             return res.get("sms")
     except Exception as e:
-        print(f"Check OTP Error: {e}")
+        log(f"Check OTP Error: {e}")
     return None
 
-
-# ৫. Order Cancel করার ফাংশন
 def cancel_order(order_id):
     params = {
         "action": "setStatus",
@@ -143,13 +137,9 @@ def cancel_order(order_id):
     try:
         requests.get(LAMIX_API_URL, params=params, timeout=10)
     except Exception as e:
-        print(f"Cancel Error: {e}")
+        log(f"Cancel Error: {e}")
 
-
-# ৬. মূল অটো-টেস্টিং লুপ
-async def test_websites_loop(
-    context: ContextTypes.DEFAULT_TYPE, chat_id: int, services: list
-):
+async def test_websites_loop(context: ContextTypes.DEFAULT_TYPE, chat_id: int, services: list):
     global waiting_for_added_event
 
     for service in services:
@@ -159,7 +149,6 @@ async def test_websites_loop(
             parse_mode="Markdown",
         )
 
-        # async Playwright ফাংশন কল করা হচ্ছে
         target_range = await get_service_range(service)
         if not target_range:
             await context.bot.send_message(
@@ -248,11 +237,7 @@ async def test_websites_loop(
                 parse_mode="Markdown",
             )
 
-
-# ৭. মেসেজ হ্যান্ডলার
-async def handle_all_messages(
-    update: Update, context: ContextTypes.DEFAULT_TYPE
-):
+async def handle_all_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global waiting_for_added_event
     text = update.message.text.strip()
 
@@ -279,17 +264,14 @@ async def handle_all_messages(
         test_websites_loop(context, update.message.chat_id, services)
     )
 
-
 def main():
     app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
-
     app.add_handler(
         MessageHandler(filters.TEXT & ~filters.COMMAND, handle_all_messages)
     )
     app.add_handler(CommandHandler("test", handle_all_messages))
-
-    print("Fast Ultra-Light Tester Bot is Running...")
+    log("Fast Ultra-Light Tester Bot is Running...")
     app.run_polling()
 
-
 if __name__ == "__main__":
+    main()
