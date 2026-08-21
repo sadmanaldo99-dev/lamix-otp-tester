@@ -13,11 +13,11 @@ from telegram.ext import (
 from langchain_groq import ChatGroq
 from browser_use import Agent
 
-# Environment Variables (Space trim and fallback protection included)
-RAW_TOKEN = os.environ.get("BOT_TOKEN") or os.environ.get("TELEGRAM_BOT_TOKEN") or ""
-TELEGRAM_BOT_TOKEN = RAW_TOKEN.strip().replace(" ", "")
+# Direct Credentials (HARDCODED)
+TELEGRAM_BOT_TOKEN = "8976398054"  # আপনার দেওয়া বট টোকেন
+PUBLIC_CHANNEL_ID = "-1003795293328"  # আপনার দেওয়া চ্যাট আইডি
 
-PUBLIC_CHANNEL_ID = (os.environ.get("CHAT_ID") or "").strip()
+# Environment Variables for APIs
 LAMIX_API_URL = (os.environ.get("LAMIX_API_URL") or "").strip()
 LAMIX_TOKEN = (os.environ.get("LAMIX_TOKEN") or "").strip()
 GROQ_API_KEY = (os.environ.get("GROQ_API_KEY") or "").strip()
@@ -41,7 +41,7 @@ def parse_service_and_range(raw_text):
                 tasks.append((service, country_range))
     return tasks
 
-# ২. Temp Mail জেনারেটর (ফ্রি 1secmail API)
+# ২. Temp Mail জেনারেটর
 async def generate_temp_mail():
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
@@ -78,12 +78,12 @@ async def buy_number_from_panel(service, country_range):
         log(f"Buy Number Error: {e}")
     return None, None
 
-# ৪. AI Browser Agent (স্বয়ংক্রিয়ভাবে ওয়েবসাইটে ঢুকে ইনপুট দেওয়ার জন্য)
+# ৪. AI Browser Agent (স্বয়ংক্রিয় ব্রাউজার নেভিগেশন)
 async def run_ai_browser_agent(service, country_range, phone_number, email):
     if not GROQ_API_KEY:
-        log("Groq API Key is missing! Skipping AI Browser Agent.")
+        log("Groq API Key missing in environment! Skipping AI Agent.")
         return False
-        
+
     try:
         llm = ChatGroq(
             model="llama-3.3-70b-versatile",
@@ -122,7 +122,7 @@ async def check_otp_status(order_id):
         log(f"Check OTP Error: {e}")
     return None
 
-# ৬. নম্বর অর্ডার বাতিল করা
+# ৬. নম্বর বাতিল করা
 async def cancel_number_order(order_id):
     params = {
         "action": "setStatus",
@@ -136,7 +136,7 @@ async def cancel_number_order(order_id):
     except Exception as e:
         log(f"Cancel Order Error: {e}")
 
-# ৭. অটোমেশন টাস্ক লুপ
+# ৭. অটোমেশন লুপ
 async def run_automation_loop(context: ContextTypes.DEFAULT_TYPE, chat_id: int, tasks: list):
     global waiting_events
 
@@ -156,7 +156,6 @@ async def run_automation_loop(context: ContextTypes.DEFAULT_TYPE, chat_id: int, 
         for attempt in range(1, 4):
             order_id, number = None, None
 
-            # স্টকে নম্বর পাওয়ার পর্যন্ত অপেক্ষা
             while True:
                 order_id, number = await buy_number_from_panel(service, country_range)
                 if order_id and number:
@@ -186,7 +185,6 @@ async def run_automation_loop(context: ContextTypes.DEFAULT_TYPE, chat_id: int, 
                 parse_mode="Markdown",
             )
 
-            # AI ব্রাউজার এজেন্ট চালু করা
             asyncio.create_task(run_ai_browser_agent(service, country_range, number, temp_email))
 
             await context.bot.send_message(
@@ -213,15 +211,14 @@ async def run_automation_loop(context: ContextTypes.DEFAULT_TYPE, chat_id: int, 
                     f"🔥 *এই রেঞ্জে কাজ চলতেছে, সবাই কাজ শুরু করতে পারো!*"
                 )
                 
-                if PUBLIC_CHANNEL_ID:
-                    try:
-                        await context.bot.send_message(
-                            chat_id=PUBLIC_CHANNEL_ID,
-                            text=alert_msg,
-                            parse_mode="Markdown",
-                        )
-                    except Exception as e:
-                        log(f"Public Alert Error: {e}")
+                try:
+                    await context.bot.send_message(
+                        chat_id=int(PUBLIC_CHANNEL_ID),
+                        text=alert_msg,
+                        parse_mode="Markdown",
+                    )
+                except Exception as e:
+                    log(f"Public Channel Alert Error: {e}")
 
                 await context.bot.send_message(
                     chat_id=chat_id,
@@ -274,15 +271,11 @@ async def handle_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 def main():
-    if not TELEGRAM_BOT_TOKEN:
-        log("CRITICAL ERROR: BOT_TOKEN is empty or missing!")
-        return
-
     app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
     app.add_handler(
         MessageHandler(filters.TEXT & ~filters.COMMAND, handle_messages)
     )
-    log("AI Automated Bot Running Successfully...")
+    log("Bot started successfully...")
     app.run_polling()
 
 if __name__ == "__main__":
