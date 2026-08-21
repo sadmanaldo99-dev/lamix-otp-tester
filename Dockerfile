@@ -1,20 +1,14 @@
-FROM python:3.10-slim
+# ১. Playwright-এর অফিশিয়াল পাইথন ইমেজ ব্যবহার
+FROM mcr.microsoft.com/playwright/python:v1.40.0-jammy
 
-# Install Google Chrome and dependencies
-RUN apt-get update && apt-get install -y \
-    wget \
-    gnupg \
-    unzip \
-    curl \
-    chromium \
-    chromium-driver \
-    && rm -rf /var/lib/apt/lists/*
-
+# ২. ওয়ার্কিং ডিরেক্টরি সেটআপ
 WORKDIR /app
 
-COPY requirements.txt .
+# ৩. প্রজেক্টের ফাইল কপি করা
+COPY . /app
+
+# ৪. ডিপেনডেন্সি ইনস্টল করা
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY . .
-
+# ৫. বট রান করার কমান্ড
 CMD ["python", "bot.py"]
