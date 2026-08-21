@@ -55,7 +55,6 @@ async def get_service_range(service_name):
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.5",
     }
     
     clean_service = service_name.strip().lower()
@@ -83,7 +82,7 @@ async def get_service_range(service_name):
         except Exception as e:
             log(f"Direct fetch failed: {e}")
 
-        # পদ্ধতি ২: ব্যাকআপ API রেঞ্জ খোঁজা
+        # পদ্ধতি ২: নিরাপদ ব্যাকআপ API রেঞ্জ খোঁজা
         if LAMIX_API_URL and LAMIX_TOKEN:
             try:
                 params = {
@@ -91,14 +90,18 @@ async def get_service_range(service_name):
                     "token": LAMIX_TOKEN
                 }
                 res = await client.get(LAMIX_API_URL, params=params)
-                data = res.json()
                 
-                data_str = str(data)
-                if clean_service in data_str.lower():
-                    nums = re.findall(r"\+?\d{4,15}", data_str)
-                    if nums:
-                        log(f"✅ Found range via API for {service_name}: {nums[0]}")
-                        return nums[0]
+                if res.status_code == 200:
+                    raw_text = res.text
+                    log(f"API Raw Response: {raw_text[:100]}")
+                    
+                    if clean_service in raw_text.lower():
+                        nums = re.findall(r"\+?\d{4,15}", raw_text)
+                        if nums:
+                            log(f"✅ Found range via API for {service_name}: {nums[0]}")
+                            return nums[0]
+                else:
+                    log(f"Lamix API Server responded with status code: {res.status_code}")
             except Exception as e:
                 log(f"API Range Search Error: {e}")
 
@@ -114,9 +117,16 @@ async def get_number_by_range(service_name, target_range):
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
             res = await client.get(LAMIX_API_URL, params=params)
-            data = res.json()
-            if data.get("status") == "success":
-                return data.get("id"), data.get("number")
+            if res.status_code == 200:
+                try:
+                    data = res.json()
+                    if data.get("status") == "success":
+                        return data.get("id"), data.get("number")
+                except Exception:
+                    # যদি JSON এর বদলে টেক্সট ফরম্যাটে রেসপন্স আসে (যেমন ACCESS_NUMBER:id:number)
+                    if "ACCESS_NUMBER" in res.text:
+                        parts = res.text.split(":")
+                        return parts[1], parts[2]
     except Exception as e:
         log(f"Get Number Error: {e}")
     return None, None
@@ -126,9 +136,14 @@ async def check_otp(order_id):
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
             res = await client.get(LAMIX_API_URL, params=params)
-            data = res.json()
-            if data.get("status") == "STATUS_OK":
-                return data.get("sms")
+            if res.status_code == 200:
+                try:
+                    data = res.json()
+                    if data.get("status") == "STATUS_OK":
+                        return data.get("sms")
+                except Exception:
+                    if "STATUS_OK" in res.text:
+                        return res.text.split("STATUS_OK:")[1]
     except Exception as e:
         log(f"Check OTP Error: {e}")
     return None
@@ -287,7 +302,5 @@ def main():
     log("Fast Ultra-Light Tester Bot is Running...")
     app.run_polling()
 
-if __name__ == "__main__":
-    main()
 if __name__ == "__main__":
     main()
