@@ -1,4 +1,14 @@
-FROM mcr.microsoft.com/playwright/python:v1.49.1-noble
+FROM python:3.10-slim
+
+# Install Google Chrome and dependencies
+RUN apt-get update && apt-get install -y \
+    wget \
+    gnupg \
+    unzip \
+    curl \
+    chromium \
+    chromium-driver \
+    && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
