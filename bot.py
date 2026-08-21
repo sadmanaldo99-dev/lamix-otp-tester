@@ -1,8 +1,8 @@
 import asyncio
 import os
 import re
+import time
 import requests
-from playwright.async_api import async_playwright
 from telegram import Update
 from telegram.ext import (
     ApplicationBuilder,
@@ -11,6 +11,11 @@ from telegram.ext import (
     MessageHandler,
     filters,
 )
+from selenium import webdriver
+from selenium.webdriver.common.by import By
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
 
 # Environment Variables
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
@@ -20,7 +25,6 @@ LAMIX_TOKEN = os.environ.get("LAMIX_TOKEN")
 
 # Global State Management
 waiting_for_added_event = asyncio.Event()
-
 
 # ১. টেক্সট থেকে সার্ভিস ফিল্টার
 def extract_services_from_text(raw_text):
@@ -49,72 +53,67 @@ def extract_services_from_text(raw_text):
 
     return cleaned_services
 
+# ২. Selenium দিয়ে আসল ব্রাউজারে টাইপ করে Range বের করার ফাংশন
+def get_service_range(service_name):
+    chrome_options = Options()
+    chrome_options.add_argument("--headless")
+    chrome_options.add_argument("--no-sandbox")
+    chrome_options.add_argument("--disable-dev-shm-usage")
+    chrome_options.add_argument("--disable-gpu")
+    chrome_options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
 
-# ২. Playwright দিয়ে আসল ব্রাউজারের মতো টাইপ করে Range বের করা
-async def get_service_range(service_name):
+    driver = None
     try:
-        async with async_playwright() as p:
-            browser = await p.chromium.launch(
-                headless=True, args=["--no-sandbox"]
-            )
-            context = await browser.new_context(
-                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-            )
-            page = await context.new_page()
+        driver = webdriver.Chrome(options=chrome_options)
+        driver.get("https://www.lamix.org/tools")
+        
+        # পেজ লোড হবার অপেক্ষা
+        time.sleep(3)
 
-            # lamix tools পেজে যাওয়া
-            await page.goto(
-                "https://www.lamix.org/tools",
-                wait_until="networkidle",
-                timeout=30000,
-            )
+        # ইনপুট বক্সে নাম টাইপ করা
+        input_box = WebDriverWait(driver, 10).until(
+            EC.presence_of_element_locator((By.TAG_NAME, "input"))
+        )
+        input_box.clear()
+        input_box.send_keys(service_name)
 
-            # ইনপুট বক্সে নাম লেখা
-            input_box = page.locator("input").first
-            await input_box.fill(service_name)
+        # সার্চ বাটনে চাপ দেওয়া
+        try:
+            search_btn = driver.find_element(By.XPATH, "//button[contains(text(), 'SEARCH')] | //input[@type='submit']")
+            search_btn.click()
+        except Exception:
+            input_box.submit()
 
-            # সার্চ বাটনে ক্লিক করা
-            search_button = page.locator(
-                "button:has-text('SEARCH'), input[type='submit']"
-            ).first
-            if await search_button.count() > 0:
-                await search_button.click()
-            else:
-                await input_box.press("Enter")
+        # ডাটা আসার জন্য অপেক্ষা
+        time.sleep(3)
 
-            # ডাটা লোড হওয়ার জন্য ২ সেকেন্ড অপেক্ষা
-            await page.wait_for_timeout(2000)
+        # রেজাল্ট টেক্সট থেকে Range খোঁজা
+        body_text = driver.find_element(By.TAG_NAME, "body").text
+        lines = body_text.split("\n")
 
-            # ফলাফল থেকে Range ফিল্টার করা
-            content = await page.content()
+        for line in lines:
+            if service_name.lower() in line.lower():
+                numbers = re.findall(r"\+?\d{4,15}", line)
+                if numbers:
+                    return numbers[0]
 
-            # পেজের টেক্সট থেকে ডিজিট/রেঞ্জ ফিল্টার
-            body_text = await page.locator("body").inner_text()
-            lines = body_text.split("\n")
-
-            for line in lines:
-                if service_name.lower() in line.lower():
-                    numbers = re.findall(r"\+?\d{4,15}", line)
+        # টেবিল এলিমেন্ট চেক
+        elements = driver.find_elements(By.XPATH, "//td | //div | //p | //span")
+        for i, elem in enumerate(elements):
+            text = elem.text.strip()
+            if service_name.lower() in text.lower():
+                for next_elem in elements[i:i+3]:
+                    numbers = re.findall(r"\+?\d{4,15}", next_elem.text)
                     if numbers:
-                        await browser.close()
                         return numbers[0]
 
-            # টেবিলের ক্ষেত্রে td খোঁজা
-            cells = await page.locator("td, div, p, span").all_inner_texts()
-            for i, text in enumerate(cells):
-                if service_name.lower() in text.lower():
-                    for next_text in cells[i : i + 3]:
-                        numbers = re.findall(r"\+?\d{4,15}", next_text)
-                        if numbers:
-                            await browser.close()
-                            return numbers[0]
-
-            await browser.close()
     except Exception as e:
-        print(f"Playwright Scraping Error: {e}")
+        print(f"Selenium Scraping Error: {e}")
+    finally:
+        if driver:
+            driver.quit()
 
     return None
-
 
 # ৩. নির্দিষ্ট Range-এর নম্বর নেওয়ার ফাংশন
 def get_number_by_range(service_name, target_range):
@@ -132,7 +131,6 @@ def get_number_by_range(service_name, target_range):
         print(f"Get Number Error: {e}")
     return None, None
 
-
 # ৪. OTP চেক করার ফাংশন
 def check_otp(order_id):
     params = {"action": "getStatus", "token": LAMIX_TOKEN, "id": order_id}
@@ -143,7 +141,6 @@ def check_otp(order_id):
     except Exception as e:
         print(f"Check OTP Error: {e}")
     return None
-
 
 # ৫. Order Cancel করার ফাংশন
 def cancel_order(order_id):
@@ -158,7 +155,6 @@ def cancel_order(order_id):
     except Exception as e:
         print(f"Cancel Error: {e}")
 
-
 # ৬. মূল অটো-টেস্টিং লুপ
 async def test_websites_loop(
     context: ContextTypes.DEFAULT_TYPE, chat_id: int, services: list
@@ -172,7 +168,7 @@ async def test_websites_loop(
             parse_mode="Markdown",
         )
 
-        target_range = await get_service_range(service)
+        target_range = get_service_range(service)
         if not target_range:
             await context.bot.send_message(
                 chat_id=chat_id,
@@ -259,7 +255,6 @@ async def test_websites_loop(
                 parse_mode="Markdown",
             )
 
-
 # ৭. মেসেজ হ্যান্ডলার
 async def handle_all_messages(
     update: Update, context: ContextTypes.DEFAULT_TYPE
@@ -290,7 +285,6 @@ async def handle_all_messages(
         test_websites_loop(context, update.message.chat_id, services)
     )
 
-
 def main():
     app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
 
@@ -299,9 +293,8 @@ def main():
     )
     app.add_handler(CommandHandler("test", handle_all_messages))
 
-    print("Playwright Smart Auto-Tester Bot is Running...")
+    print("Selenium Auto-Tester Bot is Running...")
     app.run_polling()
-
 
 if __name__ == "__main__":
     main()
