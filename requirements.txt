@@ -1,4 +1,5 @@
 python-telegram-bot
 langchain-groq
 langchain
+browser-use
 psycopg2-binary
