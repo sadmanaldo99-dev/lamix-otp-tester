@@ -1,10 +1,8 @@
 import asyncio
-import json
 import os
 import re
-import cloudscraper
 import requests
-from bs4 import BeautifulSoup
+from playwright.async_api import async_playwright
 from telegram import Update
 from telegram.ext import (
     ApplicationBuilder,
@@ -24,7 +22,7 @@ LAMIX_TOKEN = os.environ.get("LAMIX_TOKEN")
 waiting_for_added_event = asyncio.Event()
 
 
-# ১. টেক্সট থেকে ওয়েবসাইটের নাম ফিল্টার করার ফাংশন
+# ১. টেক্সট থেকে সার্ভিস ফিল্টার
 def extract_services_from_text(raw_text):
     if raw_text.startswith("/"):
         raw_text = raw_text.split(" ", 1)[-1] if " " in raw_text else ""
@@ -52,72 +50,68 @@ def extract_services_from_text(raw_text):
     return cleaned_services
 
 
-# ২. Cloudscraper ব্যবহার করে lamix.org/tools বাইপাস ও Range বের করার ফাংশন
-def get_service_range(service_name):
-    # Cloudflare প্রোটেকশন বাইপাস করার জন্য Scraper অবজেক্ট
-    scraper = cloudscraper.create_scraper(
-        browser={
-            "browser": "chrome",
-            "platform": "android",
-            "desktop": False,
-        }
-    )
-
-    url = "https://www.lamix.org/tools"
-
-    # ১. POST রিকোয়েস্ট (Tools Search Form)
+# ২. Playwright দিয়ে আসল ব্রাউজারের মতো টাইপ করে Range বের করা
+async def get_service_range(service_name):
     try:
-        payload = {"search": service_name, "query": service_name}
-        response = scraper.post(url, data=payload, timeout=12)
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(
+                headless=True, args=["--no-sandbox"]
+            )
+            context = await browser.new_context(
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            )
+            page = await context.new_page()
 
-        # যদি JSON ডাটা ফেরত দেয়
-        try:
-            data = response.json()
-            if isinstance(data, list) and len(data) > 0:
-                item = data[0]
-                return (
-                    item.get("range")
-                    or item.get("cli")
-                    or item.get("prefix")
-                    or item.get("country")
-                )
-            elif isinstance(data, dict):
-                results = data.get("results") or data.get("data") or []
-                if results:
-                    return (
-                        results[0].get("range")
-                        or results[0].get("cli")
-                        or results[0].get("prefix")
-                    )
-        except Exception:
-            pass
+            # lamix tools পেজে যাওয়া
+            await page.goto(
+                "https://www.lamix.org/tools",
+                wait_until="networkidle",
+                timeout=30000,
+            )
 
-        # যদি HTML ডাটা ফেরত দেয়
-        soup = BeautifulSoup(response.text, "html.parser")
+            # ইনপুট বক্সে নাম লেখা
+            input_box = page.locator("input").first
+            await input_box.fill(service_name)
 
-        # সকল টেবিল রোর ডাটা দেখা
-        for row in soup.find_all(["tr", "div", "p", "li"]):
-            row_text = row.get_text().strip()
-            if service_name.lower() in row_text.lower():
-                # সার্ভিস ম্যাচ করলে নম্বর/রেঞ্জ খোঁজা
-                numbers = re.findall(r"\+?\d{4,15}", row_text)
-                if numbers:
-                    return numbers[0]
+            # সার্চ বাটনে ক্লিক করা
+            search_button = page.locator(
+                "button:has-text('SEARCH'), input[type='submit']"
+            ).first
+            if await search_button.count() > 0:
+                await search_button.click()
+            else:
+                await input_box.press("Enter")
 
+            # ডাটা লোড হওয়ার জন্য ২ সেকেন্ড অপেক্ষা
+            await page.wait_for_timeout(2000)
+
+            # ফলাফল থেকে Range ফিল্টার করা
+            content = await page.content()
+
+            # পেজের টেক্সট থেকে ডিজিট/রেঞ্জ ফিল্টার
+            body_text = await page.locator("body").inner_text()
+            lines = body_text.split("\n")
+
+            for line in lines:
+                if service_name.lower() in line.lower():
+                    numbers = re.findall(r"\+?\d{4,15}", line)
+                    if numbers:
+                        await browser.close()
+                        return numbers[0]
+
+            # টেবিলের ক্ষেত্রে td খোঁজা
+            cells = await page.locator("td, div, p, span").all_inner_texts()
+            for i, text in enumerate(cells):
+                if service_name.lower() in text.lower():
+                    for next_text in cells[i : i + 3]:
+                        numbers = re.findall(r"\+?\d{4,15}", next_text)
+                        if numbers:
+                            await browser.close()
+                            return numbers[0]
+
+            await browser.close()
     except Exception as e:
-        print(f"Cloudscraper POST Error: {e}")
-
-    # ২. GET রিকোয়েস্ট (Fallback)
-    try:
-        get_res = scraper.get(f"{url}?search={service_name}", timeout=12)
-        soup = BeautifulSoup(get_res.text, "html.parser")
-        for row in soup.find_all("tr"):
-            if service_name.lower() in row.get_text().lower():
-                cols = row.find_all("td")
-                if len(cols) >= 2:
-                    return cols[1].get_text().strip()
-    except Exception as e:
-        print(f"Cloudscraper GET Error: {e}")
+        print(f"Playwright Scraping Error: {e}")
 
     return None
 
@@ -178,7 +172,7 @@ async def test_websites_loop(
             parse_mode="Markdown",
         )
 
-        target_range = get_service_range(service)
+        target_range = await get_service_range(service)
         if not target_range:
             await context.bot.send_message(
                 chat_id=chat_id,
@@ -305,7 +299,7 @@ def main():
     )
     app.add_handler(CommandHandler("test", handle_all_messages))
 
-    print("Smart Auto-Tester Bot is Running...")
+    print("Playwright Smart Auto-Tester Bot is Running...")
     app.run_polling()
 
 
